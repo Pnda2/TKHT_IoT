@@ -19,9 +19,9 @@ const char* password = "mangdanghong";
 #define PIN_WATER_ADC     35   // D35 (Cột S - Cảm biến đo mực nước bình chứa)
 #define PIN_RELAY         23   // D23 (Cột S - Relay máy bơm)
 #define PIN_TOUCH         4    // D4  (Cột S - Nút cảm ứng TTP223)
-#define PIN_DHT           15   // D15 (Cột S - Cảm biến DHT11)
+#define PIN_DHT           15   // D15 (Cột S - Cảm biến DHT22)
 
-#define DHTTYPE           DHT11
+#define DHTTYPE           DHT22
 
 // Relay Active LOW
 #define RELAY_ON          LOW
@@ -60,7 +60,7 @@ unsigned long pumpDurationSeconds = 0;
 
 unsigned long lastSensorRead = 0;
 unsigned long lastOledUpdate = 0;
-const unsigned long SENSOR_INTERVAL = 1500;
+const unsigned long SENSOR_INTERVAL = 2000; // DHT22 yeu cau chu ky doc toi thieu 2 giay
 const unsigned long OLED_INTERVAL   = 300;
 
 bool lastTouchState = LOW;

@@ -1,0 +1,183 @@
+BÀI TẬP LỚN MÔN THIẾT KẾ HỆ THỐNG NHÚNG & IOT
+BÁO CÁO KỸ THUẬT
+HỆ THỐNG GIÁM SÁT VÀ TƯỚI TIÊU TỰ ĐỘNG THÔNG MINH
+(SMART IRRIGATION SYSTEM)
+——————————————————————————————————————
+• Đề tài: 
+Hệ thống giám sát và điều khiển tưới tiêu tự động ứng dụng vi điều khiển ESP32 và Giao diện Web Dashboard
+• Nền tảng phát triển: 
+ESP32 Core (Arduino C/C++) & Visual Studio Code (HTML5/CSS3/JavaScript REST API)
+• Đối tượng nghiên cứu: 
+Cảm biến độ ẩm đất, Mực nước bình chứa, Khí hậu DHT11, Rơ-le công suất, Màn hình OLED 1.3 inch
+• Năm thực hiện: 
+2026
+1. GIỚI THIỆU VÀ TỔNG QUAN ĐỀ TÀI
+Nông nghiệp công nghệ cao và thông minh (Smart Agriculture) đang là một trong những ứng dụng quan trọng hàng đầu của công nghệ Internet of Things (IoT). Trong các phương pháp tưới tiêu truyền thống, việc tưới nước thường dựa vào cảm tính hoặc hẹn giờ cố định mà không căn cứ vào nhu cầu thực tế của cây trồng, dẫn đến tình trạng lãng phí nguồn nước, tiêu tốn điện năng hoặc ngập úng/cháy rễ cây khi thời tiết thay đổi bất thường.
+Đề tài 
+"Hệ thống giám sát và tưới tiêu tự động"
+ được thiết kế nhằm giải quyết bài toán trên bằng cách: thu thập dữ liệu thời gian thực về độ ẩm đất, nhiệt độ - độ ẩm không khí và mực nước bình chứa; từ đó tự động ra quyết định kích hoạt máy bơm nước theo thuật toán điều khiển trễ (Hysteresis Control). Đồng thời, hệ thống cung cấp giao diện hiển thị tại chỗ qua màn hình OLED 1.3 inch và giao diện giám sát - điều khiển từ xa qua Web Dashboard trên máy tính/điện thoại.
+2. DANH SÁCH LINH KIỆN VÀ THÔNG SỐ KỸ THUẬT
+Dưới đây là danh mục chi tiết các linh kiện phần cứng được sử dụng trong hệ thống:
+STT
+Tên Linh Kiện / Module
+Thông Số Kỹ Thuật Chính
+Vai Trò Trong Hệ Thống
+1
+Board vi điều khiển ESP32 DevKit (30 chân)
+Dual-Core 240MHz, 4MB Flash, Wi-Fi 2.4GHz & BLE, ADC 12-bit
+Bộ xử lý trung tâm, đọc cảm biến, chạy thuật toán và Web Server
+2
+Shield mở rộng ESP32 (Header S-V-G)
+Tích hợp Jack DC (6.5 - 16V), Jumper chọn nguồn 5V/3.3V, cọc S-V-G
+Phân phối nguồn và kết nối dây tín hiệu an toàn, chống lỏng dây
+3
+Máy bơm màng mini DC R385
+Điện áp hoạt động 9V - 12V DC, lưu lượng 1.5 - 2 L/phút, áp hút 2m
+Bơm nước từ bình chứa tưới trực tiếp vào gốc cây trồng
+4
+Module Relay 1 kênh 5V có Opto
+Kích mức LOW (Active LOW), cách ly quang Optocoupler bảo vệ MCU
+Đóng/ngắt mạch lực 12V cấp điện cho máy bơm R385
+5
+Mạch hạ áp Buck DC-DC LM2596
+Input 4 - 35V, Output chỉnh 5.0V, tích hợp màn LED hiển thị Vout
+Hạ điện áp 12V xuống 5.0V nuôi ổn định cho ESP32 và các module
+6
+Màn hình OLED 1.3 inch I2C
+Độ phân giải 128x64 pixels, Driver SH1106, giao tiếp I2C 2 dây
+Hiển thị trực quan thông số nhiệt độ, độ ẩm, chế độ tại bồn cây
+7
+Cảm biến độ ẩm đất
+Đo điện trở đất, ngõ ra Analog AO (0 - 3.3V), tích hợp LM393
+Giám sát độ khô/ẩm của đất để kích hoạt tưới tiêu tự động
+8
+Cảm biến đo mực nước bình chứa
+Ngõ ra Analog (0 - 3.3V), đo mức ngập nước theo các vạch dẫn
+Giám sát dung tích bình nước, ngắt bơm khẩn cấp khi cạn nước (<15%)
+9
+Cảm biến nhiệt độ & độ ẩm DHT11
+Dải đo nhiệt 0 - 50°C (±2°C), độ ẩm 20 - 90% RH (±5%), 1-Wire
+Giám sát vi khí hậu môi trường xung quanh cây trồng
+10
+Cảm biến cảm ứng chạm TTP223
+Điện dung 1 chạm, ngõ ra Digital (HIGH khi chạm), độ nhạy cao
+Nút bấm bật/tắt máy bơm thủ công bằng cách chạm tay trực tiếp
+11
+Diode dập xung ngược 1N4007
+Dòng thuận 1A, điện áp ngược 1000V, thời gian đáp ứng cao
+Flyback Diode mắc song song ngược cực với motor R385 chống tia lửa điện
+12
+Nguồn cấp công suất (Adapter 12V 3A)
+Điện áp ra 12V DC, dòng cực đại 3A, công suất định mức 36W
+Nguồn tổng cung cấp cho toàn bộ hệ thống (bơm lực và mạch hạ áp)
+3. BẢNG PHÂN BỔ CHÂN CẮM VÀ SƠ ĐỒ NGUYÊN LÝ
+Trên chiếc Shield mở rộng ESP32, mỗi chân GPIO được thiết kế theo tiêu chuẩn công nghiệp 3 hàng chân kim: 
+S (Signal - Tín hiệu)
+, 
+V (Voltage - Nguồn 5V)
+ và 
+G (Ground - Nối mass 0V)
+. Dưới đây là bảng đấu nối chi tiết:
+Thiết Bị / Module
+Chân Linh Kiện
+Chân ESP32 / Cột Shield
+Chức Năng Kỹ Thuật
+Màn hình OLED 1.3 inch
+SDA
+SCL
+VCC
+GND
+Hàng D21, Cột S
+Hàng D22, Cột S
+Cột V (5V)
+Cột G (GND)
+Giao tiếp I2C truyền nhận dữ liệu hiển thị (tốc độ xung nhịp 400kHz, địa chỉ mặc định 0x3C)
+Cảm biến độ ẩm đất
+AO (Analog Out)
+VCC
+GND
+Hàng D34, Cột S
+Cột V (5V)
+Cột G (GND)
+Đọc điện áp analog (0 - 3.3V) từ bộ chia áp tương ứng độ khô/ẩm của đất (ADC1 Channel 6)
+Cảm biến mực nước
+S (Signal)
+VCC (+)
+GND (-)
+Hàng D35, Cột S
+Cột V (5V)
+Cột G (GND)
+Đo độ ngập nước bình chứa (ADC1 Channel 7), cảnh báo và ngắt bơm khi mực nước < 15%
+Module Relay 1 kênh
+IN (Trigger)
+DC+ (VCC)
+DC- (GND)
+Hàng D23, Cột S
+Cột V (5V)
+Cột G (GND)
+Tín hiệu điều khiển cuộn hút Relay (Active LOW). Mức LOW: Bật bơm; Mức HIGH: Tắt bơm
+Cảm biến chạm TTP223
+I/O (OUT)
+VCC
+GND
+Hàng D4, Cột S
+Cột V (5V)
+Cột G (GND)
+Ngõ ra số CMOS. Khi chạm tay: xuất mức HIGH (3.3V) kích hoạt bật/tắt bơm thủ công
+Cảm biến khí hậu DHT11
+DATA (OUT)
+VCC (+)
+GND (-)
+Hàng D15, Cột S
+Cột V (5V)
+Cột G (GND)
+Truyền dữ liệu nối tiếp 1-Wire chuẩn số đo nhiệt độ và độ ẩm không khí môi trường
+Mạch hạ áp LM2596
+IN+ / IN-
+OUT+
+OUT-
+Nối Adapter 12V
+Cọc 5V Shield
+Cọc GND Shield
+Cung cấp nguồn 5.0V ổn định công suất cao nuôi ESP32 và toàn bộ cảm biến, nối chung mass
+Sơ đồ mạch lực điều khiển động cơ bơm 12V:
+• Cực Dương (+) 12V từ Adapter nối vào chân COM (Chân giữa) của Relay.
+• Chân NO (Thường mở) của Relay nối vào Cực Dương (+) của Bơm màng R385.
+• Cực Âm (-) 12V từ Adapter nối thẳng vào Cực Âm (-) của Bơm màng R385 và nối chung mass (GND) với hệ thống.
+• Diode dập xung 1N4007 (Flyback Diode): 
+Mắc song song ngược cực ngay tại 2 đầu dây của động cơ bơm (Cực Catot có vạch bạc nối vào cực Dương motor; cực Anot không vạch nối vào cực Âm motor). Khi rơ-le ngắt điện, cuộn cảm motor phóng dòng điện tự cảm ngược; Diode 1N4007 sẽ dẫn ngắn mạch năng lượng này dập tắt tia lửa điện tại tiếp điểm relay và ngăn xung điện cao áp đánh thủng chân ESP32.
+4. CÁC TÍNH NĂNG VÀ NGUYÊN LÝ HOẠT ĐỘNG
+4.1. Thuật toán tưới tự động với dải trễ (Hysteresis Control)
+Hệ thống ứng dụng thuật toán điều khiển trễ với 2 ngưỡng cài đặt độc lập: Ngưỡng đất khô (mặc định 40%) và Ngưỡng đủ ẩm (mặc định 65%).
+• Khi độ ẩm đất suy giảm xuống dưới ngưỡng khô (< 40%): ESP32 tự động kích hoạt Relay bật máy bơm.
+• Trong quá trình tưới, nước ngấm dần làm độ ẩm tăng từ 40% lên 50%, 60%: Máy bơm vẫn duy trì hoạt động liên tục chứ không ngắt sớm.
+• Khi độ ẩm đạt hoặc vượt ngưỡng đủ ẩm (>= 65%): ESP32 ra lệnh ngắt máy bơm.
+-> Ý nghĩa kỹ thuật: Loại bỏ hoàn toàn hiện tượng dao động quanh điểm ngưỡng (chattering/giật rơ-le), giúp bảo vệ tiếp điểm relay và tăng tuổi thọ động cơ máy bơm.
+4.2. Chế độ điều khiển thủ công linh hoạt (Manual Mode)
+Người vận hành có thể can thiệp bật/tắt máy bơm bất kỳ lúc nào bằng 2 phương thức song song:
+• Nút cảm ứng chạm TTP223 tại chỗ: Chạm tay nhẹ vào miếng cảm ứng trên bồn cây để bật/tắt bơm tức thời.
+• Nút bấm ảo trên Giao diện Web: Click chuột vào nút 'BẬT MÁY BƠM' / 'TẮT MÁY BƠM' trên trình duyệt.
+Khi có sự can thiệp thủ công, hệ thống tự động chuyển sang chế độ MANU để nhường toàn quyền điều khiển cho người dùng.
+4.3. Cơ chế bảo vệ an toàn phần cứng kép (Dual Safety Protection)
+• Bảo vệ cạn nước bình chứa: Cảm biến đo mức nước (D35) liên tục quét dung tích bình. Khi nước tụt xuống dưới 15%, hệ thống lập tức khóa bơm khẩn cấp, từ chối mọi lệnh bật bơm (kể cả ấn nút tay) và hiển thị cảnh báo đỏ trên OLED lẫn Web.
+• Bảo vệ quá thời gian (Pump Safety Timeout 60s): Nếu máy bơm chạy liên tục vượt quá 60 giây (do tuột ống dẫn hoặc rò rỉ nước), ESP32 tự động cưỡng chế ngắt bơm để chống cháy động cơ R385 và chống ngập úng.
+4.4. Bảng điều khiển Web Dashboard hiện đại trên Visual Studio Code
+Giao diện Web được xây dựng độc lập bằng HTML5, CSS3 và JavaScript hiện đại (Fetch API), kết nối mượt mà với ESP32 qua cơ chế REST API và mở khóa CORS:
+• Hiển thị thời gian thực thẻ thông số: Nhiệt độ, Độ ẩm không khí, Độ ẩm đất và Mực nước bình chứa.
+• Biểu đồ đường động (Chart.js): Vẽ đồ thị biến thiên độ ẩm đất và nhiệt độ theo thời gian thực mỗi 1.5 giây.
+• Tùy chỉnh ngưỡng tưới: Có thanh trượt kéo/thả cài đặt mốc độ ẩm và lưu thẳng vào bộ nhớ Flash NVS (Preferences) của ESP32 không bị mất khi mất điện.
+• Nhật ký hoạt động (Activity Log) & Xuất dữ liệu Excel: Tự động ghi nhật ký các lần tưới và hỗ trợ nút bấm 'Xuất Dữ Liệu Báo Cáo (CSV)' tải file Excel về máy.
+4.5. Màn hình giám sát tại chỗ OLED 1.3 inch (SH1106)
+Màn hình OLED 1.3 inch giao tiếp I2C tốc độ cao, hiển thị rõ nét: Giờ thực tế, Chế độ (AUTO/MANU), Mực nước bình chứa (%), Nhiệt độ - Độ ẩm khí hậu, Độ ẩm đất (%) cỡ chữ lớn và Trạng thái máy bơm. Tích hợp cơ chế Timeout 50ms chống treo hệ thống.
+4.6. Đồng bộ thời gian thực Internet (NTP Real-Time Clock)
+ESP32 tự động kết nối máy chủ thời gian thế giới qua giao thức NTP (Network Time Protocol) và tính toán theo múi giờ chuẩn Việt Nam (GMT+7). Toàn bộ dữ liệu hiển thị trên màn hình và nhật ký đều gắn mốc thời gian thực tế chính xác đến từng giây.
+5. KẾT LUẬN VÀ HƯỚNG PHÁT TRIỂN
+5.1. Kết quả đạt được:
+• Hệ thống phần cứng hoạt động ổn định, phân tách rõ ràng mạch điều khiển vi xử lý và mạch lực công suất qua relay cách ly quang và diode dập xung.
+• Đọc và xử lý số liệu cảm biến chính xác: cảm biến độ ẩm đất đo dải 0 - 100%, cảm biến mực nước bình chứa phản hồi tuyến tính, DHT11 đo chuẩn nhiệt - ẩm không khí.
+• Thuật toán tưới tự động trễ (Hysteresis) kết hợp cơ chế khóa bảo vệ an toàn cạn nước và chống cháy bơm 60 giây hoạt động tin cậy.
+• Giao diện Web Dashboard trực quan, tương thích đa nền tảng (PC/Smartphone), vẽ đồ thị thời gian thực và cho phép xuất file dữ liệu báo cáo dạng CSV.
+5.2. Hướng phát triển mở rộng:
+• Tích hợp giao thức MQTT kết nối lên máy chủ đám mây (Cloud Broker) để giám sát và điều khiển bồn cây qua mạng Internet từ bất kỳ nơi đâu trên thế giới.
+• Ứng dụng nguồn năng lượng tái tạo (Tấm pin năng lượng mặt trời Solar Panel kết hợp mạch sạc pin Lithium 18650) để tạo thành trạm tưới tiêu tự cung cấp năng lượng độc lập cho nông nghiệp công nghệ cao.
+• Tích hợp thuật toán học máy (Machine Learning) dự báo nhu cầu bốc thoát hơi nước của cây trồng dựa trên dữ liệu thời tiết lịch sử.
