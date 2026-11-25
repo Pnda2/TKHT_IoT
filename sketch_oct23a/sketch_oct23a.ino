@@ -7,6 +7,8 @@
 #include <DHT.h>
 #include <Preferences.h>
 #include <time.h>
+#include <math.h>
+#include <esp_timer.h>
 
 // =================== CẤU HÌNH WIFI ===================
 const char* ssid     = "TuanTrinh";
@@ -40,8 +42,24 @@ Preferences prefs;
 bool isAutoMode = true;
 bool isPumpOn = false;
 bool oledFound = false;
-bool isWaterAvailable = true;
+bool isWaterAvailable = false;
 bool isPumpTimeoutAlert = false;
+bool preferencesReady = false;
+bool cutoffReady = false;
+portMUX_TYPE relayLock = portMUX_INITIALIZER_UNLOCKED;
+esp_timer_handle_t pumpWatchdog = nullptr;
+bool relayArmed = false;
+bool cutoffPending = false;
+int64_t relayDeadlineUs = 0;
+bool flowAnomaly = false;
+bool flowConfirmed = false;
+bool dhtValid = false;
+int aiDryMinutes = -1;
+int flowStartSoil = 0;
+int flowStartWater = 100;
+unsigned long flowWindowStart = 0;
+const unsigned long FLOW_CHECK_INTERVAL = 12000;
+const int FLOW_DELTA_PERCENT = 2; // Loai nhieu ADC nho, can hieu chuan thuc te.
 
 int soilDryThreshold = 40;
 int soilWetThreshold = 65;
@@ -59,28 +77,109 @@ unsigned long pumpStartTime = 0;
 unsigned long pumpDurationSeconds = 0;
 
 unsigned long lastSensorRead = 0;
+unsigned long lastWaterRead = 0;
 unsigned long lastOledUpdate = 0;
 const unsigned long SENSOR_INTERVAL = 2000; // DHT22 yeu cau chu ky doc toi thieu 2 giay
 const unsigned long OLED_INTERVAL   = 300;
+const unsigned long WATER_INTERVAL  = 200;
 
 bool lastTouchState = LOW;
+bool rawTouchState = LOW;
+unsigned long touchChangedAt = 0;
+bool staOnline = false;
+bool fallbackAp = false;
+unsigned long staDisconnectedAt = 0;
+unsigned long lastWifiRetry = 0;
+
+// Timer task owns only the physical cutoff; loop owns the application state.
+void pumpWatchdogTick(void*) {
+  portENTER_CRITICAL(&relayLock);
+  if (relayArmed && esp_timer_get_time() >= relayDeadlineUs) {
+    gpio_set_level(static_cast<gpio_num_t>(PIN_RELAY), RELAY_OFF);
+    relayArmed = false;
+    cutoffPending = true;
+  }
+  portEXIT_CRITICAL(&relayLock);
+}
+
+void syncPumpCutoff() {
+  portENTER_CRITICAL(&relayLock);
+  const bool cut = cutoffPending;
+  cutoffPending = false;
+  portEXIT_CRITICAL(&relayLock);
+  if (cut) {
+    isPumpOn = false;
+    pumpDurationSeconds = 0;
+    isPumpTimeoutAlert = true;
+  }
+}
+
+int readMedianAdc(int pin) {
+  int samples[5];
+  for (int i = 0; i < 5; ++i) {
+    const int value = analogRead(pin);
+    int j = i;
+    for (; j > 0 && samples[j - 1] > value; --j) samples[j] = samples[j - 1];
+    samples[j] = value;
+  }
+  return samples[2];
+}
+
+bool validThresholds(int dry, int wet) {
+  return dry >= 10 && dry <= 60 && wet >= 50 && wet <= 95 && dry < wet;
+}
+
+// Hoi quy toc do mat am (%/phut), suy luan offline, khong goi Cloud.
+// He so khoi tao theo kinh nghiem; can hieu chuan bang du lieu vuon thuc te.
+// -1 = DHT khong hop le; 0 = dat da cham nguong kho 40%.
+int predictMinutesToDry(float temp, float hum, int soil) {
+  if (soil <= 40) return 0;
+  if (!isfinite(temp) || !isfinite(hum) || temp < -40 || temp > 80 || hum < 0 || hum > 100) return -1;
+  float lossRate = 0.12f + 0.008f * (temp - 25.0f) - 0.0012f * (hum - 60.0f);
+  lossRate = constrain(lossRate, 0.02f, 0.8f);
+  return constrain((int)ceilf((soil - 40) / lossRate), 1, 4320);
+}
+
+// So sanh bien thien tich luy trong tung cua so, khong so tung mau de tranh nhieu.
+void checkFlowAnomaly() {
+  if (!isPumpOn) return;
+  bool progress = soilPercent - flowStartSoil >= FLOW_DELTA_PERCENT ||
+                  flowStartWater - waterPercent >= FLOW_DELTA_PERCENT;
+  if (progress) {
+    flowConfirmed = true;
+    flowStartSoil = soilPercent;
+    flowStartWater = waterPercent;
+    flowWindowStart = millis();
+  } else if (millis() - flowWindowStart > FLOW_CHECK_INTERVAL) {
+    flowAnomaly = true; // Giu canh bao den lan bat bom tiep theo.
+    flowConfirmed = false;
+  }
+}
 
 // =================== BẬT / TẮT BƠM AN TOÀN ===================
 void setPump(bool state) {
-  // Nếu cạn nước -> Ngăn chặn bật bơm
-  if (state && !isWaterAvailable) {
-    Serial.println(F("[CANH BAO] Khong the bat bom: Binh chua het nuoc!"));
-    isPumpOn = false;
-    digitalWrite(PIN_RELAY, RELAY_OFF);
+  if (state && (!isWaterAvailable || !cutoffReady)) return;
+  portENTER_CRITICAL(&relayLock);
+  // A cutoff racing with a command must be processed before any restart.
+  if (cutoffPending || state == isPumpOn) {
+    portEXIT_CRITICAL(&relayLock);
+    syncPumpCutoff();
     return;
   }
-
+  relayArmed = state;
+  if (state) relayDeadlineUs = esp_timer_get_time() + MAX_PUMP_SECONDS * 1000000LL;
+  gpio_set_level(static_cast<gpio_num_t>(PIN_RELAY), state ? RELAY_ON : RELAY_OFF);
+  portEXIT_CRITICAL(&relayLock);
   isPumpOn = state;
-  digitalWrite(PIN_RELAY, isPumpOn ? RELAY_ON : RELAY_OFF);
 
   if (isPumpOn) {
     pumpStartTime = millis();
     isPumpTimeoutAlert = false;
+    flowAnomaly = false;
+    flowConfirmed = false;
+    flowStartSoil = soilPercent;
+    flowStartWater = waterPercent;
+    flowWindowStart = pumpStartTime;
   } else {
     pumpDurationSeconds = 0;
   }
@@ -90,20 +189,20 @@ void setPump(bool state) {
 }
 
 // =================== LẤY THỜI GIAN NTP ===================
-String getCurrentTimeString() {
+void formatCurrentTime(char* timeStr, size_t size) {
+  const time_t now = time(nullptr);
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    return "--:--:--";
+  if (!localtime_r(&now, &timeinfo) || timeinfo.tm_year <= 116) {
+    snprintf(timeStr, size, "--:--:--");
+    return;
   }
-  char timeStr[20];
-  strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
-  return String(timeStr);
+  strftime(timeStr, size, "%H:%M:%S", &timeinfo);
 }
 
 // =================== ĐỌC CẢM BIẾN & ĐO MỰC NƯỚC ===================
-void readSensors() {
-  // 1. Đọc cảm biến đo mực nước bình chứa (GPIO 35)
-  waterRaw = analogRead(PIN_WATER_ADC);
+void readWaterLevel() {
+  lastWaterRead = millis();
+  waterRaw = readMedianAdc(PIN_WATER_ADC);
   // Hiệu chuẩn: khô ngoài không khí ~ 200, nhúng ngập vạch ~ 2600
   waterPercent = map(waterRaw, 200, 2600, 0, 100);
   waterPercent = constrain(waterPercent, 0, 100);
@@ -116,34 +215,27 @@ void readSensors() {
     setPump(false);
     Serial.println(F("[AN TOAN] Ngat bom khan cap: Binh chua het nuoc!"));
   }
+}
 
-  // 2. Đọc DHT11
+void readSensors() {
+  readWaterLevel();
+  // 2. Doc DHT22; khong dung gia tri cu de du doan khi cam bien loi.
   float h = dht.readHumidity();
   float t = dht.readTemperature();
-  if (!isnan(h) && !isnan(t)) {
+  dhtValid = isfinite(h) && isfinite(t) && h >= 0 && h <= 100 && t >= -40 && t <= 80;
+  if (dhtValid) {
     airHumidity = h;
     airTemp = t;
   }
 
   // 3. Đọc độ ẩm đất (GPIO 34)
-  soilRaw = analogRead(PIN_SOIL_ADC);
+  soilRaw = readMedianAdc(PIN_SOIL_ADC);
   const int DRY_RAW = 3500;
   const int WET_RAW = 1400;
   soilPercent = map(soilRaw, DRY_RAW, WET_RAW, 0, 100);
   soilPercent = constrain(soilPercent, 0, 100);
-
-  // 4. Đọc nút chạm
-  touchState = digitalRead(PIN_TOUCH);
-
-  // 5. Kiểm tra thời gian bơm liên tục
-  if (isPumpOn) {
-    pumpDurationSeconds = (millis() - pumpStartTime) / 1000;
-    if (pumpDurationSeconds >= MAX_PUMP_SECONDS) {
-      setPump(false);
-      isPumpTimeoutAlert = true;
-      Serial.println(F("[AN TOAN] Ngat bom tu dong vi da bom qua 60 giay!"));
-    }
-  }
+  aiDryMinutes = dhtValid ? predictMinutesToDry(airTemp, airHumidity, soilPercent) : -1;
+  checkFlowAnomaly();
 
   Serial.print(F("[DATA] Dat: ")); Serial.print(soilPercent);
   Serial.print(F("% | Nuoc: ")); Serial.print(waterPercent);
@@ -165,7 +257,9 @@ void updateOLED() {
   display.setCursor(40, 0);
   display.print(F("GARDEN"));
   display.setCursor(80, 0);
-  display.print(getCurrentTimeString());
+  char timeStr[9];
+  formatCurrentTime(timeStr, sizeof(timeStr));
+  display.print(timeStr);
   display.drawLine(0, 9, 127, 9, SH110X_WHITE);
 
   // Cảnh báo cạn nước ưu tiên
@@ -195,26 +289,32 @@ void updateOLED() {
 
   // Dòng 4: Khí hậu & Máy bơm
   display.setTextSize(1);
-  display.setCursor(0, 48);
+  display.setCursor(0, 43);
   display.print((int)airTemp);
   display.print(F("C|"));
   display.print((int)airHumidity);
   display.print(F("% "));
 
   if (isPumpOn) {
-    display.fillRect(48, 46, 52, 14, SH110X_WHITE);
+    display.fillRect(64, 41, 36, 12, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK, SH110X_WHITE);
-    display.setCursor(52, 49);
-    display.print(F("DANG BAT"));
+    display.setCursor(68, 43);
+    display.print(F("ON"));
     display.setTextColor(SH110X_WHITE);
-    display.setCursor(102, 49);
+    display.setCursor(102, 43);
     display.print(pumpDurationSeconds);
     display.print(F("s"));
   } else {
-    display.setCursor(48, 48);
+    display.setCursor(64, 43);
     display.print(isPumpTimeoutAlert ? F("NGAT(60s)") : F("DANG TAT"));
   }
 
+  display.setCursor(0, 56);
+  if (flowAnomaly) display.print(F("LOI: KIEM TRA BOM/ONG"));
+  else if (aiDryMinutes < 0) display.print(F("AI: Cho DHT22"));
+  else {
+    display.print(F("Kho ~")); display.print(aiDryMinutes); display.print(F("p nua | AI:ON"));
+  }
   display.display();
 }
 
@@ -224,30 +324,36 @@ void handleRoot() {
   server.send(200, "text/plain", "ESP32 Water Monitoring Ready");
 }
 
+void sendDataSnapshot() {
+  syncPumpCutoff();
+  server.sendHeader("Cache-Control", "no-store");
+
+  char json[512], timeStr[9];
+  formatCurrentTime(timeStr, sizeof(timeStr));
+  const auto boolean = [](bool value) { return value ? "true" : "false"; };
+  const int len = snprintf(json, sizeof(json),
+    "{\"temp\":%.1f,\"hum\":%.1f,\"dht_valid\":%s,\"ai_dry_min\":%d,"
+    "\"flow_anomaly\":%s,\"flow_confirmed\":%s,\"soil\":%d,\"raw\":%d,"
+    "\"water_pct\":%d,\"water_raw\":%d,\"touch\":%s,\"pump\":%s,\"mode\":\"%s\","
+    "\"water\":%s,\"timeout_alert\":%s,\"pump_time\":%lu,\"dry_th\":%d,"
+    "\"wet_th\":%d,\"time\":\"%s\"}",
+    airTemp, airHumidity, boolean(dhtValid), aiDryMinutes, boolean(flowAnomaly),
+    boolean(isPumpOn && flowConfirmed && !flowAnomaly), soilPercent, soilRaw,
+    waterPercent, waterRaw, boolean(touchState), boolean(isPumpOn),
+    isAutoMode ? "AUTO" : "MANU", boolean(isWaterAvailable), boolean(isPumpTimeoutAlert),
+    pumpDurationSeconds, soilDryThreshold, soilWetThreshold, timeStr);
+  if (len < 0 || static_cast<size_t>(len) >= sizeof(json)) {
+    server.send(500, "application/json", "{\"error\":\"Snapshot unavailable\"}");
+    return;
+  }
+  server.send(200, "application/json", json);
+}
+
 void handleData() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   server.sendHeader("Access-Control-Allow-Headers", "*");
-
-  String json = "{";
-  json += "\"temp\":" + String(airTemp, 1) + ",";
-  json += "\"hum\":" + String(airHumidity, 1) + ",";
-  json += "\"soil\":" + String(soilPercent) + ",";
-  json += "\"raw\":" + String(soilRaw) + ",";
-  json += "\"water_pct\":" + String(waterPercent) + ",";
-  json += "\"water_raw\":" + String(waterRaw) + ",";
-  json += "\"touch\":" + String(touchState ? "true" : "false") + ",";
-  json += "\"pump\":" + String(isPumpOn ? "true" : "false") + ",";
-  json += "\"mode\":\"" + String(isAutoMode ? "AUTO" : "MANU") + "\",";
-  json += "\"water\":" + String(isWaterAvailable ? "true" : "false") + ",";
-  json += "\"timeout_alert\":" + String(isPumpTimeoutAlert ? "true" : "false") + ",";
-  json += "\"pump_time\":" + String(pumpDurationSeconds) + ",";
-  json += "\"dry_th\":" + String(soilDryThreshold) + ",";
-  json += "\"wet_th\":" + String(soilWetThreshold) + ",";
-  json += "\"time\":\"" + getCurrentTimeString() + "\"";
-  json += "}";
-
-  server.send(200, "application/json", json);
+  sendDataSnapshot();
 }
 
 void handleTogglePump() {
@@ -255,9 +361,30 @@ void handleTogglePump() {
   server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   server.sendHeader("Access-Control-Allow-Headers", "*");
 
+  // Lenh state tuy chon la idempotent; giu tuong thich endpoint toggle cu.
+  if (server.hasArg("state") && server.arg("state") != "0" && server.arg("state") != "1") {
+    server.send(400, "application/json", "{\"error\":\"Trang thai bom khong hop le\"}");
+    return;
+  }
+  syncPumpCutoff();
+  bool target = server.hasArg("state") ? server.arg("state") == "1" : !isPumpOn;
+  if (target) readWaterLevel();
+  if (target && !isWaterAvailable) {
+    server.send(409, "application/json", "{\"error\":\"Binh chua can nuoc, bom bi khoa\"}");
+    return;
+  }
+  if (target && !cutoffReady) {
+    server.send(503, "application/json", "{\"error\":\"Pump watchdog unavailable\"}");
+    return;
+  }
   isAutoMode = false;
-  setPump(!isPumpOn);
-  server.send(200, "application/json", "{\"status\":\"ok\"}");
+  setPump(target);
+  syncPumpCutoff();
+  if (target && !isPumpOn) {
+    server.send(503, "application/json", "{\"error\":\"Pump cutoff occurred\"}");
+    return;
+  }
+  sendDataSnapshot();
 }
 
 void handleSetMode() {
@@ -267,11 +394,15 @@ void handleSetMode() {
 
   if (server.hasArg("mode")) {
     String m = server.arg("mode");
+    if (m != "auto" && m != "manual") {
+      server.send(400, "application/json", "{\"error\":\"Che do khong hop le\"}");
+      return;
+    }
     isAutoMode = (m == "auto");
   } else {
     isAutoMode = !isAutoMode;
   }
-  server.send(200, "application/json", "{\"mode\":\"" + String(isAutoMode ? "AUTO" : "MANU") + "\"}");
+  sendDataSnapshot();
 }
 
 void handleSetThresholds() {
@@ -280,33 +411,96 @@ void handleSetThresholds() {
   server.sendHeader("Access-Control-Allow-Headers", "*");
 
   if (server.hasArg("dry") && server.hasArg("wet")) {
-    soilDryThreshold = server.arg("dry").toInt();
-    soilWetThreshold = server.arg("wet").toInt();
-
-    prefs.putInt("dry", soilDryThreshold);
-    prefs.putInt("wet", soilWetThreshold);
+    String dryArg = server.arg("dry"), wetArg = server.arg("wet");
+    int dry = dryArg.toInt(), wet = wetArg.toInt();
+    if (String(dry) != dryArg || String(wet) != wetArg || !validThresholds(dry, wet)) {
+      server.send(400, "application/json", "{\"error\":\"Nguong tuoi khong hop le\"}");
+      return;
+    }
+    // One NVS key commits both values together. Skip repeated writes.
+    if (!preferencesReady) {
+      server.send(500, "application/json", "{\"error\":\"NVS unavailable\"}");
+      return;
+    }
+    if (dry != soilDryThreshold || wet != soilWetThreshold) {
+      const uint16_t pair = (dry << 8) | wet;
+      if (prefs.putUShort("thresholds", pair) != sizeof(pair)) {
+        server.send(500, "application/json", "{\"error\":\"NVS write failed\"}");
+        return;
+      }
+      soilDryThreshold = dry;
+      soilWetThreshold = wet;
+    }
+  } else {
+    server.send(400, "application/json", "{\"error\":\"Thieu nguong dry/wet\"}");
+    return;
   }
 
-  server.send(200, "application/json", "{\"status\":\"saved\"}");
+  sendDataSnapshot();
 }
 
 // =================== SETUP ===================
+void updateWifi(unsigned long now) {
+  const bool online = WiFi.status() == WL_CONNECTED;
+  if (online != staOnline) {
+    staOnline = online;
+    if (online) {
+      Serial.println(WiFi.localIP());
+      static bool mdnsStarted = false;
+      if (!mdnsStarted) mdnsStarted = MDNS.begin("smartgarden");
+      configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    } else {
+      staDisconnectedAt = now;
+      lastWifiRetry = now;
+    }
+  }
+  if (online) return;
+
+  // Keep the fallback AP available after STA recovers so AP clients stay connected.
+  if (!fallbackAp && now - staDisconnectedAt >= 5000 &&
+      now - lastWifiRetry >= 5000) {
+    lastWifiRetry = now;
+    if (WiFi.mode(WIFI_AP_STA)) {
+      fallbackAp = WiFi.softAP("ESP32_SmartGarden", "12345678");
+      if (fallbackAp) Serial.println(WiFi.softAPIP());
+    }
+    WiFi.reconnect();
+  } else if (fallbackAp && now - lastWifiRetry >= 15000) {
+    lastWifiRetry = now;
+    WiFi.reconnect();
+  }
+}
+
 void setup() {
+  // Preload HIGH before enabling the output driver.
+  gpio_set_level(static_cast<gpio_num_t>(PIN_RELAY), RELAY_OFF);
+  pinMode(PIN_RELAY, OUTPUT);
+  digitalWrite(PIN_RELAY, RELAY_OFF);
+  esp_timer_create_args_t timerArgs = {};
+  timerArgs.callback = pumpWatchdogTick;
+  timerArgs.name = "pump-cutoff";
+  cutoffReady = esp_timer_create(&timerArgs, &pumpWatchdog) == ESP_OK &&
+                esp_timer_start_periodic(pumpWatchdog, 20000) == ESP_OK;
   Serial.begin(115200);
-  delay(200);
   Serial.println(F("\n=========================================="));
   Serial.println(F("   HE THONG TUOI & GIAM SAT MUC NUOC PRO  "));
   Serial.println(F("=========================================="));
 
   // 1. Đọc cấu hình Flash
-  prefs.begin("garden", false);
-  soilDryThreshold = prefs.getInt("dry", 40);
-  soilWetThreshold = prefs.getInt("wet", 65);
+  preferencesReady = prefs.begin("garden", false);
+  if (preferencesReady) {
+    const uint16_t pair = prefs.getUShort("thresholds", 0);
+    soilDryThreshold = pair ? pair >> 8 : prefs.getInt("dry", 40);
+    soilWetThreshold = pair ? pair & 0xff : prefs.getInt("wet", 65);
+  }
+  if (!validThresholds(soilDryThreshold, soilWetThreshold)) {
+    soilDryThreshold = 40;
+    soilWetThreshold = 65;
+  }
 
   // 2. Chân phần cứng
-  pinMode(PIN_RELAY, OUTPUT);
-  setPump(false);
   pinMode(PIN_TOUCH, INPUT_PULLDOWN);
+  touchState = rawTouchState = lastTouchState = digitalRead(PIN_TOUCH);
   pinMode(PIN_SOIL_ADC, INPUT);
   pinMode(PIN_WATER_ADC, INPUT);
 
@@ -325,58 +519,57 @@ void setup() {
     display.setCursor(20, 36);
     display.println(F("GIAM SAT NUOC"));
     display.display();
-    delay(1000);
   }
 
   // 4. Kết nối WiFi
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
-  int retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 12) {
-    delay(400);
-    Serial.print(".");
-    retry++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println(F("\n[WiFi] Da ket noi WiFi thanh cong!"));
-    Serial.print(F(">>> IP ESP32: "));
-    Serial.println(WiFi.localIP());
-    MDNS.begin("smartgarden");
-    configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-  } else {
-    Serial.println(F("\n[WiFi] Phat WiFi du phong: ESP32_SmartGarden"));
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("ESP32_SmartGarden", "12345678");
-    Serial.print(F(">>> IP: http://"));
-    Serial.println(WiFi.softAPIP());
-  }
+  staDisconnectedAt = lastWifiRetry = millis();
 
   // 5. REST API
-  server.on("/", handleRoot);
-  server.on("/api/data", handleData);
-  server.on("/api/toggle", handleTogglePump);
-  server.on("/api/mode", handleSetMode);
-  server.on("/api/settings", handleSetThresholds);
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/data", HTTP_GET, handleData);
+  server.on("/api/toggle", HTTP_GET, handleTogglePump);
+  server.on("/api/toggle", HTTP_POST, handleTogglePump);
+  server.on("/api/mode", HTTP_GET, handleSetMode);
+  server.on("/api/mode", HTTP_POST, handleSetMode);
+  server.on("/api/settings", HTTP_GET, handleSetThresholds);
+  server.on("/api/settings", HTTP_POST, handleSetThresholds);
+  server.onNotFound([]() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (server.method() == HTTP_OPTIONS) server.send(204, "text/plain", "");
+    else server.send(404, "application/json", "{}");
+  });
   server.begin();
 
   readSensors();
+  lastSensorRead = millis();
 }
 
 // =================== LOOP ===================
 void loop() {
-  server.handleClient();
+  syncPumpCutoff();
   unsigned long currentMillis = millis();
+  if (currentMillis - lastWaterRead >= WATER_INTERVAL) readWaterLevel();
 
   // 1. Nút chạm TTP223
   bool touch = digitalRead(PIN_TOUCH);
-  if (lastTouchState == LOW && touch == HIGH) {
-    isAutoMode = false;
-    setPump(!isPumpOn);
-    delay(50);
+  if (touch != rawTouchState) {
+    rawTouchState = touch;
+    touchChangedAt = currentMillis;
   }
-  lastTouchState = touch;
+  if (touch != lastTouchState && currentMillis - touchChangedAt >= 50) {
+    lastTouchState = touchState = touch;
+    if (touch) {
+      if (!isPumpOn) readWaterLevel();
+      if (isPumpOn || (isWaterAvailable && cutoffReady)) {
+        isAutoMode = false;
+        setPump(!isPumpOn);
+      }
+    }
+  }
 
   // 2. Đo cảm biến định kỳ
   if (currentMillis - lastSensorRead >= SENSOR_INTERVAL) {
@@ -384,7 +577,7 @@ void loop() {
     readSensors();
 
     if (isAutoMode && isWaterAvailable) {
-      if (soilPercent < soilDryThreshold && !isPumpOn) {
+      if (soilPercent < soilDryThreshold && !isPumpOn && !isPumpTimeoutAlert) {
         setPump(true);
       } else if (soilPercent >= soilWetThreshold && isPumpOn) {
         setPump(false);
@@ -392,9 +585,14 @@ void loop() {
     }
   }
 
+  syncPumpCutoff();
+  if (isPumpOn) pumpDurationSeconds = (millis() - pumpStartTime) / 1000;
+
   // 3. Cập nhật OLED
   if (currentMillis - lastOledUpdate >= OLED_INTERVAL) {
     lastOledUpdate = currentMillis;
     updateOLED();
   }
+  updateWifi(currentMillis);
+  server.handleClient();
 }

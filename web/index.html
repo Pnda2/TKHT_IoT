@@ -3,18 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Smart Garden PRO | BTL He Thong Tuoi Tu Dong ESP32</title>
+  <title>Hệ Thống Giám Sát & Tưới Tự Động</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <meta name="color-scheme" content="light">
 </head>
 <body>
+  <div id="toastContainer" class="toast-container" role="status" aria-live="polite"></div>
   <div class="container">
     <!-- Header -->
     <header>
       <div class="logo">
         <span class="icon">🌱</span>
         <div>
-          <h1>HỆ THỐNG GIÁM SÁT & TƯỚI TỰ ĐỘNG PRO</h1>
+          <h1>HỆ THỐNG GIÁM SÁT & TƯỚI TỰ ĐỘNG</h1>
           <div class="subtitle">Đề tài Bài tập lớn - IoT ESP32 & Năng lượng</div>
         </div>
       </div>
@@ -28,7 +29,7 @@
     </header>
 
     <!-- Banner Cảnh Báo An Toàn Khẩn Cấp -->
-    <div id="safetyAlertBanner" class="alert-banner" style="display: none;">
+    <div id="safetyAlertBanner" class="alert-banner" role="alert" style="display: none;">
       ⚠️ <span id="safetyAlertMsg">CẢNH BÁO AN TOÀN!</span>
     </div>
 
@@ -53,44 +54,49 @@
       <!-- Thẻ 1: Nhiệt độ -->
       <div class="card card-temp">
         <div class="card-icon">🌡️</div>
-        <div class="card-title">Nhiệt Độ (DHT22)</div>
+        <div class="card-title">Nhiệt Độ</div>
         <div class="card-value" id="valTemp">-- &deg;C</div>
+        <div id="tempMeter" class="mini-meter temperature-meter" role="meter" aria-label="Nhiệt độ" aria-valuemin="-40" aria-valuemax="80"><span id="tempBarFill"></span></div>
+        <div class="meter-legend"><span>Thấp</span><span>20–32°C lý tưởng</span><span>Cao</span></div>
         <div class="card-sub" id="tempStatus">Khí hậu ổn định</div>
       </div>
 
       <!-- Thẻ 2: Độ ẩm không khí -->
       <div class="card card-hum">
         <div class="card-icon">💧</div>
-        <div class="card-title">Độ Ẩm Không Khí (DHT22)</div>
+        <div class="card-title">Độ Ẩm Không Khí</div>
         <div class="card-value" id="valHum">-- %</div>
+        <div id="humMeter" class="mini-meter" role="meter" aria-label="Độ ẩm không khí" aria-valuemin="0" aria-valuemax="100"><span id="humBarFill"></span></div>
         <div class="card-sub">Độ ẩm môi trường xung quanh</div>
       </div>
 
       <!-- Thẻ 3: Độ ẩm đất -->
       <div class="card card-soil">
         <div class="card-icon">🪴</div>
-        <div class="card-title">Độ Ẩm Đất (GPIO 34)</div>
+        <div class="card-title">Độ Ẩm Đất</div>
         <div class="card-value" id="valSoil">-- %</div>
-        <div class="card-sub" id="valRaw">Tín hiệu ADC thô: --</div>
+        <div id="soilMeter" class="mini-meter soil-meter" role="meter" aria-label="Độ ẩm đất" aria-valuemin="0" aria-valuemax="100"><span id="soilBarFill"></span></div>
+        <div class="card-sub ai-edge" id="edgePrediction">Edge AI · Đang chờ dữ liệu</div>
+        <div class="card-sub" id="valRaw" hidden>Tín hiệu ADC: --</div>
       </div>
 
-      <!-- Thẻ 4: Bình chứa nước (Đo mức nước Analog GPIO 35) -->
+      <!-- Thẻ 4: Bình chứa nước -->
       <div class="card card-water">
         <div class="card-icon">🚰</div>
-        <div class="card-title">Mực Nước Bình Chứa (D35)</div>
+        <div class="card-title">Mực Nước Bình Chứa</div>
         <div class="card-value" id="valWater">-- %</div>
-        <div class="water-bar-bg">
+        <div class="water-bar-bg" id="waterMeter" role="meter" aria-label="Mực nước" aria-valuemin="0" aria-valuemax="100">
           <div class="water-bar-fill" id="waterBarFill" style="width: 0%;"></div>
         </div>
         <div class="card-sub" id="waterSub">Trạng thái: Đang giám sát...</div>
       </div>
     </div>
 
-    <!-- Hàng điều khiển & Cài đặt thông số Flash -->
+    <!-- Hàng điều khiển & Cài đặt thông số -->
     <div class="control-section">
       <!-- Cột 1: Điều khiển máy bơm -->
       <div class="card pump-card">
-        <h3>Điều Khiển Máy Bơm Nước (Relay GPIO 23)</h3>
+        <h3>Điều Khiển Máy Bơm Nước</h3>
         <p class="pump-status-text">
           Trạng thái: <strong id="pumpStatusLabel">ĐANG TẮT</strong>
         </p>
@@ -100,29 +106,45 @@
         <button id="mainPumpBtn" class="btn-pump btn-pump-off" onclick="togglePump()">
           BẬT MÁY BƠM
         </button>
+        <div id="flowBadge" class="flow-badge flow-idle" role="status" aria-live="polite">○ Bơm đang tắt</div>
+        <div id="demoControls" class="demo-controls" hidden><label for="demoScenario">Kịch bản Demo</label><select id="demoScenario" onchange="changeDemoScenario()"><option value="normal">Tưới bình thường</option><option value="blocked">Tắc dòng nước / tuột ống</option><option value="empty">Bình cạn nước</option></select></div>
       </div>
 
-      <!-- Cột 2: Cài đặt ngưỡng độ ẩm (Lưu vào Flash ESP32) -->
+      <!-- Cột 2: Cài đặt ngưỡng độ ẩm -->
       <div class="card settings-card">
-        <h3>Cài Đặt Ngưỡng Tưới Thông Minh (Lưu Flash)</h3>
+        <h3>Cài Đặt Ngưỡng Tưới</h3>
         
         <div class="slider-group">
-          <label>
+          <label for="sliderDry">
             Ngưỡng đất khô (Tự bật bơm): <strong id="lblDry">40%</strong>
           </label>
           <input type="range" id="sliderDry" min="10" max="60" value="40" oninput="onSliderChange()">
         </div>
 
         <div class="slider-group">
-          <label>
+          <label for="sliderWet">
             Ngưỡng đủ ẩm (Tự dừng bơm): <strong id="lblWet">65%</strong>
           </label>
           <input type="range" id="sliderWet" min="50" max="95" value="65" oninput="onSliderChange()">
         </div>
 
-        <button class="btn-save-settings" onclick="saveThresholds()">💾 Lưu Cài Đặt Vào ESP32</button>
+        <button id="saveSettingsBtn" class="btn-save-settings" onclick="saveThresholds()">💾 Lưu Cài Đặt</button>
       </div>
     </div>
+
+    <section class="card ai-card" aria-labelledby="aiTitle">
+      <div class="ai-heading"><div><span class="eyebrow">GEMINI CLOUD · CỐ VẤN VI KHÍ HẬU</span><h3 id="aiTitle">✦ Trợ Lý Cây Trồng AI</h3></div><span class="ai-chip">Edge AI hoạt động offline</span></div>
+      <p class="ai-description">Nhận định theo cảm biến thực tế và hỏi đáp chăm sóc cây bằng tiếng Việt.</p>
+      <div class="ai-settings">
+        <div class="key-field"><label for="geminiKey">API Key Gemini</label><div class="key-input"><input id="geminiKey" type="password" autocomplete="off" placeholder="Nhập API Key của bạn"><button id="keyVisibilityBtn" type="button" onclick="toggleKeyVisibility()" aria-pressed="false">Hiện key</button></div></div>
+        <div><label for="geminiModel">Model Gemini</label><input id="geminiModel" value="gemini-2.0-flash" list="geminiModels"><datalist id="geminiModels"><option value="gemini-2.0-flash"><option value="gemini-2.5-flash-lite"><option value="gemini-2.5-flash"></datalist></div>
+        <button class="btn-ai" onclick="saveGeminiSettings()">Lưu cấu hình</button>
+      </div>
+      <p class="privacy-note">Key được lưu trên trình duyệt này. Khi dùng Gemini, dữ liệu cảm biến được gửi trực tiếp đến Google. Edge AI không cần key hay Internet.</p>
+      <div class="analysis-panel"><div class="analysis-header"><strong>Phân tích khu vườn</strong><button id="analyzeBtn" class="btn-ai" onclick="analyzeGarden()">✦ Phân tích với Gemini</button></div><p id="localInsight">Đang chờ dữ liệu vi khí hậu...</p><div id="aiAnalysis" class="ai-response" aria-live="polite">Lưu key để tự phân tích lần đầu, sau đó tối đa mỗi 5 phút khi trang đang mở. Có thể đổi model nếu model cũ không còn khả dụng.</div></div>
+      <div id="chatMessages" class="chat-messages" role="log" aria-live="polite"><p class="chat-message assistant">🌱 Bạn có thể hỏi về lịch tưới, nhiệt độ hoặc độ ẩm phù hợp cho cây.</p></div>
+      <form class="chat-form" onsubmit="sendChat(event)"><label class="sr-only" for="chatInput">Câu hỏi cho chuyên gia cây trồng</label><input id="chatInput" maxlength="1000" placeholder="Ví dụ: Với độ ẩm này, tôi có nên tưới ngay?"><button id="chatSendBtn" type="submit" class="btn-ai">Gửi ↗</button></form>
+    </section>
 
     <!-- Biểu đồ thời gian thực -->
     <div class="card chart-card">
@@ -131,6 +153,7 @@
         <button class="btn-export" onclick="exportCSV()">📥 Xuất Dữ Liệu Báo Cáo (CSV / Excel)</button>
       </div>
       <canvas id="realtimeChart"></canvas>
+      <p id="chartFallback" class="card-sub" hidden>Chưa tải được Chart.js. Các cảm biến và điều khiển vẫn hoạt động; kết nối Internet rồi tải lại để xem biểu đồ.</p>
     </div>
 
     <!-- Bảng nhật ký tưới cây -->
@@ -161,6 +184,9 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script defer src="app.js"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"
+    integrity="sha384-T/4KgSWuZEPozpPz7rnnp/5lDSnpY1VPJCojf1S81uTHS1E38qgLfMgVsAeRCWc4"
+    crossorigin="anonymous" onload="if (typeof initChart === 'function') initChart()"></script>
 </body>
 </html>
