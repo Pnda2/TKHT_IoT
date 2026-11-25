@@ -1,4 +1,6 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Wire.h>
@@ -13,6 +15,12 @@
 // =================== CẤU HÌNH WIFI ===================
 const char* ssid     = "TuanTrinh";
 const char* password = "mangdanghong";
+
+// =================== CẤU HÌNH TELEGRAM BOT ===================
+// LƯU Ý BẢO MẬT: Điền Bot Token và Chat ID của bạn ở đây khi nạp code vào board.
+// Không commit mã token thật lên GitHub công khai để tránh bị lộ.
+const char* const TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
+const char* const TELEGRAM_CHAT_ID   = "YOUR_TELEGRAM_CHAT_ID";
 
 // =================== CẤU HÌNH CHÂN (S - V - G) ===================
 #define PIN_OLED_SDA      21   // D21 (Cột S)
@@ -102,6 +110,84 @@ void pumpWatchdogTick(void*) {
   portEXIT_CRITICAL(&relayLock);
 }
 
+// =================== GỬI THÔNG BÁO TELEGRAM (ASYNC) ===================
+volatile bool telegramTaskRunning = false;
+
+struct TelegramMessage {
+  char text[384];
+};
+
+void sendTelegramTask(void* parameter) {
+  TelegramMessage* msg = static_cast<TelegramMessage*>(parameter);
+  if (WiFi.status() == WL_CONNECTED && msg != nullptr) {
+    WiFiClientSecure client;
+    client.setInsecure(); // Bo qua xac thuc chung chi SSL de toi uu RAM
+    client.setTimeout(6); // 6 giay timeout
+
+    HTTPClient https;
+    String url = "https://api.telegram.org/bot";
+    url += TELEGRAM_BOT_TOKEN;
+    url += "/sendMessage";
+
+    if (https.begin(client, url)) {
+      https.addHeader("Content-Type", "application/json");
+
+      String payload = "{\"chat_id\":\"";
+      payload += TELEGRAM_CHAT_ID;
+      payload += "\",\"text\":\"";
+      
+      const char* p = msg->text;
+      while (*p) {
+        if (*p == '"') payload += "\\\"";
+        else if (*p == '\\') payload += "\\\\";
+        else if (*p == '\n') payload += "\\n";
+        else if (*p == '\r') { /* bo qua */ }
+        else if (*p == '\t') payload += "\\t";
+        else payload += *p;
+        p++;
+      }
+      payload += "\",\"parse_mode\":\"HTML\"}";
+
+      int httpResponseCode = https.POST(payload);
+      if (httpResponseCode > 0) {
+        Serial.printf("[TELEGRAM] Da gui tin nhan, HTTP: %d\n", httpResponseCode);
+      } else {
+        Serial.printf("[TELEGRAM] Loi gui tin nhan: %d\n", httpResponseCode);
+      }
+      https.end();
+    }
+    client.stop();
+  }
+  if (msg) delete msg;
+  telegramTaskRunning = false;
+  vTaskDelete(NULL);
+}
+
+void notifyTelegram(const char* message) {
+  if (WiFi.status() != WL_CONNECTED || telegramTaskRunning) return;
+  if (strcmp(TELEGRAM_BOT_TOKEN, "YOUR_TELEGRAM_BOT_TOKEN") == 0) return;
+
+  TelegramMessage* msg = new TelegramMessage();
+  if (!msg) return;
+  strncpy(msg->text, message, sizeof(msg->text) - 1);
+  msg->text[sizeof(msg->text) - 1] = '\0';
+
+  telegramTaskRunning = true;
+  BaseType_t res = xTaskCreatePinnedToCore(
+    sendTelegramTask,
+    "teleTask",
+    8192,
+    msg,
+    1,
+    NULL,
+    0 // Chay tren Core 0 khong lam cham loop chinh tren Core 1
+  );
+  if (res != pdPASS) {
+    telegramTaskRunning = false;
+    delete msg;
+  }
+}
+
 void syncPumpCutoff() {
   portENTER_CRITICAL(&relayLock);
   const bool cut = cutoffPending;
@@ -111,6 +197,14 @@ void syncPumpCutoff() {
     isPumpOn = false;
     pumpDurationSeconds = 0;
     isPumpTimeoutAlert = true;
+    char timeoutMsg[256];
+    snprintf(timeoutMsg, sizeof(timeoutMsg),
+      "🚨 <b>CẢNH BÁO: BƠM TỰ NGẮT SAU 60 GIÂY!</b>\n"
+      "Hệ thống đã cưỡng chế tắt bơm để bảo vệ máy.\n"
+      "🪴 Độ ẩm đất: %d%% | 🚰 Nước: %d%%\n"
+      "👉 Vui lòng kiểm tra lại bồn cây trước khi bật lại.",
+      soilPercent, waterPercent);
+    notifyTelegram(timeoutMsg);
   }
 }
 
@@ -151,6 +245,14 @@ void checkFlowAnomaly() {
     flowStartWater = waterPercent;
     flowWindowStart = millis();
   } else if (millis() - flowWindowStart > FLOW_CHECK_INTERVAL) {
+    if (!flowAnomaly) {
+      char anomalyMsg[256];
+      snprintf(anomalyMsg, sizeof(anomalyMsg),
+        "⚠️ <b>CẢNH BÁO DÒNG NƯỚC BẤT THƯỜNG!</b>\n"
+        "Bơm đã bật hơn 12s nhưng độ ẩm đất không tăng và nước bình không giảm.\n"
+        "👉 Kiểm tra ngay: tuột ống dẫn, kẹt cánh quạt hoặc cảm biến rơi!");
+      notifyTelegram(anomalyMsg);
+    }
     flowAnomaly = true; // Giu canh bao den lan bat bom tiep theo.
     flowConfirmed = false;
   }
@@ -170,6 +272,7 @@ void setPump(bool state) {
   if (state) relayDeadlineUs = esp_timer_get_time() + MAX_PUMP_SECONDS * 1000000LL;
   gpio_set_level(static_cast<gpio_num_t>(PIN_RELAY), state ? RELAY_ON : RELAY_OFF);
   portEXIT_CRITICAL(&relayLock);
+  const bool previousPumpState = isPumpOn;
   isPumpOn = state;
 
   if (isPumpOn) {
@@ -180,8 +283,29 @@ void setPump(bool state) {
     flowStartSoil = soilPercent;
     flowStartWater = waterPercent;
     flowWindowStart = pumpStartTime;
+
+    char pumpOnMsg[256];
+    snprintf(pumpOnMsg, sizeof(pumpOnMsg),
+      "💧 <b>Bắt đầu bơm nước!</b>\n"
+      "🕹 Chế độ: %s\n"
+      "🪴 Độ ẩm đất: %d%% (Ngưỡng bật: %d%%)\n"
+      "🚰 Nước bình: %d%%",
+      isAutoMode ? "TỰ ĐỘNG" : "THỦ CÔNG",
+      soilPercent, soilDryThreshold, waterPercent);
+    notifyTelegram(pumpOnMsg);
   } else {
+    unsigned long duration = previousPumpState ? (millis() - pumpStartTime) / 1000 : pumpDurationSeconds;
     pumpDurationSeconds = 0;
+    if (previousPumpState && !isPumpTimeoutAlert) {
+      char pumpOffMsg[256];
+      snprintf(pumpOffMsg, sizeof(pumpOffMsg),
+        "✅ <b>Đã ngắt máy bơm!</b>\n"
+        "🪴 Độ ẩm đất hiện tại: %d%%\n"
+        "⏱ Thời gian bơm: %lu giây\n"
+        "🚰 Nước bình: %d%%",
+        soilPercent, duration, waterPercent);
+      notifyTelegram(pumpOffMsg);
+    }
   }
 
   Serial.print(F("[RELAY] Trang thai bom: "));
@@ -214,6 +338,22 @@ void readWaterLevel() {
   if (isPumpOn && !isWaterAvailable) {
     setPump(false);
     Serial.println(F("[AN TOAN] Ngat bom khan cap: Binh chua het nuoc!"));
+  }
+
+  static bool emptyWaterAlertSent = false;
+  if (!isWaterAvailable) {
+    if (!emptyWaterAlertSent) {
+      emptyWaterAlertSent = true;
+      char alertMsg[256];
+      snprintf(alertMsg, sizeof(alertMsg),
+        "🚨 <b>CẢNH BÁO KHẨN CẤP: BÌNH CHỨA HẾT NƯỚC!</b>\n"
+        "🚰 Mực nước hiện tại: %d%% (< 15%%)\n"
+        "🔒 Hệ thống đã KHÓA máy bơm để chống cháy động cơ.",
+        waterPercent);
+      notifyTelegram(alertMsg);
+    }
+  } else if (waterPercent >= 25) {
+    emptyWaterAlertSent = false;
   }
 }
 
@@ -449,6 +589,19 @@ void updateWifi(unsigned long now) {
       static bool mdnsStarted = false;
       if (!mdnsStarted) mdnsStarted = MDNS.begin("smartgarden");
       configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+      static bool bootTelegramSent = false;
+      if (!bootTelegramSent) {
+        bootTelegramSent = true;
+        char bootMsg[256];
+        snprintf(bootMsg, sizeof(bootMsg),
+          "🌱 <b>Hệ thống tưới tự động đã kết nối!</b>\n"
+          "📍 IP: %s\n"
+          "🪴 Độ ẩm đất: %d%% | 🚰 Nước bình: %d%%\n"
+          "⏱ Trạng thái: Sẵn sàng giám sát",
+          WiFi.localIP().toString().c_str(), soilPercent, waterPercent);
+        notifyTelegram(bootMsg);
+      }
     } else {
       staDisconnectedAt = now;
       lastWifiRetry = now;

@@ -93,6 +93,16 @@ Kiểm thử tự động sử dụng DOM/timer/network giả lập, kiểm tra 
 | `GET/POST /api/mode?mode=auto` | Chọn AUTO; `mode=manual` chọn MANU; trả snapshot |
 | `GET/POST /api/settings?dry=40&wet=65` | Lưu Flash và trả snapshot; HTTP 400 nếu không hợp lệ |
 
+## Thông báo Telegram
+
+Firmware ESP32 tích hợp gửi thông báo trực tiếp qua Telegram Bot API (chạy ngầm trên Core 0 qua FreeRTOS Task, không làm chậm vòng lặp chính). Hệ thống tự động gửi tin nhắn khi:
+- **Hệ thống online:** Kết nối Wi-Fi thành công, báo địa chỉ IP và trạng thái sẵn sàng.
+- **Bắt đầu tưới:** Thông báo chế độ (AUTO / MANU), độ ẩm đất hiện tại và mực nước.
+- **Tưới xong:** Báo độ ẩm đạt được, thời gian bơm thực tế và lượng nước còn lại.
+- **Cảnh báo hết nước (<15%):** Khóa bơm khẩn cấp và gửi cảnh báo về điện thoại.
+- **Cảnh báo timeout 60s:** Cưỡng chế ngắt bơm khi chạy liên tục quá 60 giây.
+- **Cảnh báo dòng nước bất thường:** Bơm chạy > 12 giây nhưng đất không ẩm thêm và nước không giảm.
+
 Dashboard gửi lệnh thay đổi bằng POST. HTTP 500 khi NVS không lưu được ngưỡng và HTTP 503 khi chốt thời gian chưa sẵn sàng hoặc đã can thiệp trong lúc bật bơm.
 
 `/api/toggle` không truyền `state` vẫn hỗ trợ đảo trạng thái như phiên bản cũ. CORS OPTIONS chỉ trả preflight, không được thực thi lệnh. Các trường bổ sung: `ai_dry_min` (phút, -1 nếu thiếu DHT22), `dht_valid`, `flow_anomaly`, `flow_confirmed`; giữ nguyên các trường API cũ. API hiện phục vụ mạng LAN theo thiết kế ban đầu, chưa có xác thực người dùng.
